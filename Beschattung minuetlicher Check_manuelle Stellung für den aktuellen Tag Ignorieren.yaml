@@ -1,6 +1,6 @@
 blueprint:
-  name: "Intervall-Beschattungs-Management (mit manuellem Override-Schutz)"
-  description: "Prüft jede Minute Azimut, Temperatur und Helligkeit. Wurde ein Aktor heute manuell verändert, wird er für den Rest des Tages ignoriert."
+  name: "Intervall-Beschattungs-Management (Syntax Fix)"
+  description: "Prüft jede Minute Azimut, Temperatur und Helligkeit. Schützt Aktoren vor automatischer Veränderung, wenn sie am selben Tag manuell bedient wurden."
   domain: automation
   input:
     # Sensoren
@@ -125,41 +125,28 @@ trigger:
     minutes: "/1"
 
 action:
+  # Das Geheimnis: Hier weisen wir die Inputs sauber als YAML-Variablen zu.
+  # Ab hier wird KEIN "!" mehr im gesamten Dokument benötigt.
   - variables:
+      sensor_helligkeit: !input illuminance_sensor
+      sensor_temp: !input temp_sensor
+      limit_helligkeit: !input illuminance_limit
+      limit_temp: !input temp_limit
       start_haupt: !input azimuth_start_haupt
       stop_haupt: !input azimuth_stop_haupt
       start_gaube: !input azimuth_start_gaube
       stop_gaube: !input azimuth_stop_gaube
-      current_azimuth: "{{ state_attr('sun.sun', 'azimuth') | float(0) }}"
-      
-      # Entitäten aus dem Input holen
+      p_markise: !input pos_markise
+      p_haupt: !input pos_haupt
+      p_gaube: !input pos_gaube
       markise_entity: !input cover_markise
       gaube_entity: !input cover_gaube
-      # Da covers_haupt eine Liste sein kann, erzwingen wir ein sauberes Format
-      haupt_entities: >-
-        {% set h = !input covers_haupt %}
-        {{ [h] if h is string else h }}
-
-      # JINJA-Makro zur Prüfung auf manuellen Override AM HEUTIGEN TAG
-      # Erklärt: Wenn der Zustand heute geändert wurde (last_changed ist heute) 
-      # UND die Änderung NICHT von einer Automation stammt (parent_id ist none) 
-      # UND entweder von einem User oder dem Web-UI ausgelöst wurde (user_id nicht leer) -> Override aktiv.
-      is_manually_overridden: >-
-        {% flexo(entity_id) %}
-          {% set s = states[entity_id] %}
-          {% if s is not none %}
-            {% set last_ch = s.last_changed %}
-            {% set is_today = last_ch.date() == now().date() %}
-            {% set manual = s.context.parent_id is none and s.context.user_id is not none %}
-            {{ is_today and manual }}
-          {% else %}
-            false
-          {% endif %}
-        {% endmacro %}
-
-      # Einzelne Vorabprüfungen für die Aktoren
-      markise_blocked: "{{ is_manually_overridden(markise_entity) | trim == 'true' }}"
-      gaube_blocked: "{{ is_manually_overridden(gaube_entity) | trim == 'true' }}"
+      raw_haupt: !input covers_haupt
+      
+      current_azimuth: "{{ state_attr('sun.sun', 'azimuth') | float(0) }}"
+      
+      # Macht aus den Haupt-Entitäten ein sauberes Array, völlig ohne "!"
+      haupt_entities: "{{ [raw_haupt] if raw_haupt is string else raw_haupt }}"
 
   # ---------------------------------------------------------------------------
   # BLOCK A: HAUPTBESCHATTUNG (Markise & Hauptrollläden)
@@ -167,37 +154,37 @@ action:
   - choose:
       # FALL 1: Schließen
       - conditions:
-          - condition: numeric_state
-            entity_id: !input illuminance_sensor
-            above: !input illuminance_limit
-          - condition: numeric_state
-            entity_id: !input temp_sensor
-            above: !input temp_limit
+          - condition: template
+            value_template: "{{ states(sensor_helligkeit) | float(0) > limit_helligkeit | float }}"
+          - condition: template
+            value_template: "{{ states(sensor_temp) | float(0) > limit_temp | float }}"
           - condition: template
             value_template: "{{ current_azimuth >= (start_haupt | float) and current_azimuth < (stop_haupt | float) }}"
         sequence:
-          # Markise steuern (falls nicht manuell blockiert)
+          # Markise steuern (falls heute nicht manuell bewegt)
           - if:
               - condition: template
-                value_template: "{{ not markise_blocked }}"
+                value_template: >-
+                  {% set s = states[markise_entity] %}
+                  {{ not (s is not none and s.last_changed.date() == now().date() and s.context.parent_id is none and s.context.user_id is not none) }}
             then:
               - action: cover.set_cover_position
                 data:
-                  position: !input pos_markise
+                  position: "{{ p_markise }}"
                 target:
                   entity_id: "{{ markise_entity }}"
           
-          # Hauptrollläden filtern und steuern (nur die nicht blockierten)
+          # Hauptrollläden filtern und steuern
           - action: cover.set_cover_position
             data:
-              position: !input pos_haupt
+              position: "{{ p_haupt }}"
             target:
               entity_id: >-
-                {% set filtered = haupt_entities | reject('test', 'defined', 'is_manually_overridden') | list %}
-                {# Da ein Makro im Filter komplex ist, bauen wir eine einfache Schleife: #}
                 {% set ns = namespace(allowed=[]) %}
                 {% for e in haupt_entities %}
-                  {% if is_manually_overridden(e) | trim != 'true' %}
+                  {% set s = states[e] %}
+                  {% set manual = s is not none and s.last_changed.date() == now().date() and s.context.parent_id is none and s.context.user_id is not none %}
+                  {% if not manual %}
                     {% set ns.allowed = ns.allowed + [e] %}
                   {% endif %}
                 {% endfor %}
@@ -208,10 +195,12 @@ action:
           - condition: template
             value_template: "{{ current_azimuth >= (stop_haupt | float) }}"
         sequence:
-          # Markise öffnen (wenn unblockiert)
+          # Markise öffnen
           - if:
               - condition: template
-                value_template: "{{ not markise_blocked }}"
+                value_template: >-
+                  {% set s = states[markise_entity] %}
+                  {{ not (s is not none and s.last_changed.date() == now().date() and s.context.parent_id is none and s.context.user_id is not none) }}
             then:
               - action: cover.set_cover_position
                 data:
@@ -219,7 +208,7 @@ action:
                 target:
                   entity_id: "{{ markise_entity }}"
           
-          # Hauptrollläden öffnen (nur unblockierte)
+          # Hauptrollläden öffnen
           - action: cover.set_cover_position
             data:
               position: 100
@@ -227,7 +216,9 @@ action:
               entity_id: >-
                 {% set ns = namespace(allowed=[]) %}
                 {% for e in haupt_entities %}
-                  {% if is_manually_overridden(e) | trim != 'true' %}
+                  {% set s = states[e] %}
+                  {% set manual = s is not none and s.last_changed.date() == now().date() and s.context.parent_id is none and s.context.user_id is not none %}
+                  {% if not manual %}
                     {% set ns.allowed = ns.allowed + [e] %}
                   {% endif %}
                 {% endfor %}
@@ -238,23 +229,23 @@ action:
   # ---------------------------------------------------------------------------
   - if:
       - condition: template
-        value_template: "{{ not gaube_blocked }}"
+        value_template: >-
+          {% set s = states[gaube_entity] %}
+          {{ not (s is not none and s.last_changed.date() == now().date() and s.context.parent_id is none and s.context.user_id is not none) }}
     then:
       - choose:
           # FALL 1: Schließen
           - conditions:
-              - condition: numeric_state
-                entity_id: !input illuminance_sensor
-                above: !input illuminance_limit
-              - condition: numeric_state
-                entity_id: !input temp_sensor
-                above: !input temp_limit
+              - condition: template
+                value_template: "{{ states(sensor_helligkeit) | float(0) > limit_helligkeit | float }}"
+              - condition: template
+                value_template: "{{ states(sensor_temp) | float(0) > limit_temp | float }}"
               - condition: template
                 value_template: "{{ current_azimuth >= (start_gaube | float) and current_azimuth < (stop_gaube | float) }}"
             sequence:
               - action: cover.set_cover_position
                 data:
-                  position: !input pos_gaube
+                  position: "{{ p_gaube }}"
                 target:
                   entity_id: "{{ gaube_entity }}"
 

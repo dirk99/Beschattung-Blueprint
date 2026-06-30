@@ -1,214 +1,312 @@
-###############################################################################
-# Package: Automatische Beschattung mit zuverlässigem manuellen Override
-###############################################################################
+blueprint:
+  name: "Intervall-Beschattung mit manuellem Schutz"
+  description: "Prüft in einstellbaren Intervallen Azimut, Temperatur und Helligkeit. Schützt Aktoren vor automatischer Veränderung, wenn sie am selben Tag manuell bedient wurden."
+  domain: automation
+  input:
+    # Zeitintervall
+    check_interval:
+      name: Prüfintervall (Minuten)
+      description: "Wie oft (in Minuten) soll die Beschattung überprüft werden?"
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 60
+          unit_of_measurement: "min"
 
-# 1. Die Helfer-Schalter, um den manuellen Eingriff pro Bereich zu speichern
-input_boolean:
-  beschattung_override_markise:
-    name: "Beschattung: Manueller Eingriff Markise"
-    icon: mdi:hand-back-left
-  beschattung_override_haupt:
-    name: "Beschattung: Manueller Eingriff Hauptrollläden"
-    icon: mdi:hand-back-left
-  beschattung_override_gaube:
-    name: "Beschattung: Manueller Eingriff Gaube"
-    icon: mdi:hand-back-left
+    # Sensoren
+    illuminance_sensor:
+      name: Helligkeitssensor
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: illuminance
+    temp_sensor:
+      name: Temperatursensor
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: temperature
+    
+    # Schwellenwerte
+    illuminance_limit:
+      name: Helligkeits-Grenzwert
+      default: 900
+      selector:
+        number:
+          min: 0
+          max: 100000
+          unit_of_measurement: lx
+    temp_limit:
+      name: Temperatur-Grenzwert
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 50
+          unit_of_measurement: "°C"
 
-automation:
-  # ---------------------------------------------------------------------------
-  # AUTOMATION 1: Jede Minute Werte prüfen und Aktoren steuern
-  # ---------------------------------------------------------------------------
-  - id: beschattung_intervall_steuerung
-    alias: "Beschattung: Minütliche Prüfung"
-    trigger:
-      - platform: time_pattern
-        minutes: "/1"
-    action:
-      # HIER DEINE ENTITÄTEN UND WUNSCHWERTE ANPASSEN:
-      - variables:
-          sensor_helligkeit: "sensor.0x8c65a3fffe3daa26_illuminance"
-          sensor_temp: "sensor.homematic_ip_sv_w_temperatur"
-          limit_helligkeit: 900
-          limit_temp: 20
-          
-          start_haupt: 90
-          stop_haupt: 280
-          start_gaube: 190
-          stop_gaube: 330
-          
-          pos_markise: 0
-          pos_haupt: 20
-          pos_gaube: 0
-          
-          current_azimuth: "{{ state_attr('sun.sun', 'azimuth') | float(0) }}"
+    # Winkel-Einstellungen
+    azimuth_start_haupt:
+      name: Azimut Start Hauptbeschattung
+      default: 90
+      selector:
+        number:
+          min: 0
+          max: 360
+          unit_of_measurement: "°"
+    azimuth_stop_haupt:
+      name: Azimut Ende Hauptbeschattung
+      default: 280
+      selector:
+        number:
+          min: 0
+          max: 360
+          unit_of_measurement: "°"
+    azimuth_start_gaube:
+      name: Azimut Start Gaubenbeschattung
+      default: 190
+      selector:
+        number:
+          min: 0
+          max: 360
+          unit_of_measurement: "°"
+    azimuth_stop_gaube:
+      name: Azimut Ende Gaubenbeschattung
+      default: 330
+      selector:
+        number:
+          min: 0
+          max: 360
+          unit_of_measurement: "°"
 
-      # --- SEKTION A: MARKISE ---
-      - choose:
-          # Wenn NICHT manuell eingegriffen wurde...
-          - conditions:
-              - condition: state
-                entity_id: input_boolean.beschattung_override_markise
-                state: "off"
-            sequence:
+    # Aktoren & Positionen
+    cover_markise:
+      name: Markise Aktor
+      selector:
+        entity:
+          filter:
+            - domain: cover
+    pos_markise:
+      name: Position Markise bei Beschattung
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+    covers_haupt:
+      name: Haupt-Rollläden/Jalousien
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: cover
+    pos_haupt:
+      name: Position Haupt-Rollläden bei Beschattung
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+    cover_gaube:
+      name: Gauben-Rollladen/Jalousie
+      selector:
+        entity:
+          filter:
+            - domain: cover
+    pos_gaube:
+      name: Position Gaube bei Beschattung
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+mode: parallel
+max: 10
+
+trigger:
+  - platform: time_pattern
+    minutes: "/1"
+    id: interval_trigger
+  - platform: event
+    event_type: call_service
+    event_data:
+      domain: cover
+    id: manual_trigger
+
+action:
+  - variables:
+      interval_setting: !input check_interval
+      sensor_helligkeit: !input illuminance_sensor
+      sensor_temp: !input temp_sensor
+      limit_helligkeit: !input illuminance_limit
+      limit_temp: !input temp_limit
+      start_haupt: !input azimuth_start_haupt
+      stop_haupt: !input azimuth_stop_haupt
+      start_gaube: !input azimuth_start_gaube
+      stop_gaube: !input azimuth_stop_gaube
+      p_markise: !input pos_markise
+      p_haupt: !input pos_haupt
+      p_gaube: !input pos_gaube
+      markise_entity: !input cover_markise
+      gaube_entity: !input cover_gaube
+      raw_haupt: !input covers_haupt
+      
+      current_azimuth: "{{ state_attr('sun.sun', 'azimuth') | float(0) }}"
+      haupt_entities: "{{ [raw_haupt] if raw_haupt is string else raw_haupt }}"
+
+  - choose:
+      # REAKTION A: Manueller Fahrbefehl abfangen
+      - conditions:
+          - condition: trigger
+            id: manual_trigger
+          - condition: template
+            value_template: "{{ trigger.event.context.parent_id is none }}"
+          - condition: template
+            value_template: "{{ trigger.event.data.service in ['set_cover_position', 'open_cover', 'close_cover', 'stop_cover'] }}"
+          - condition: template
+            value_template: >-
+              {% set t = trigger.event.data.service_data.entity_id %}
+              {{ t == markise_entity or t == gaube_entity or t in haupt_entities }}
+        sequence:
+          - delay: "00:00:01"
+
+      # REAKTION B: Intervallsteuerung ausführen
+      - conditions:
+          - condition: trigger
+            id: interval_trigger
+          - condition: template
+            value_template: "{{ now().minute % (interval_setting | int) == 0 }}"
+        sequence:
+          - variables:
+              # Hier steht jetzt das korrekte Makro-Wort ("macro" statt "flexo")
+              is_blocked: >-
+                {% macro check_entity(entity_id) %}
+                  {% set s = states[entity_id] %}
+                  {% if s is not none %}
+                    {% set is_today = s.last_changed.date() == now().date() %}
+                    {% set manual_state = s.context.parent_id is none and s.context.user_id is not none %}
+                    {{ is_today and manual_state }}
+                  {% else %}
+                    false
+                  {% endif %}
+                {% endmacro %}
+                {{ check_entity(check_target) }}
+
+              # Vorabprüfung der Blockaden unter Nutzung der Makro-Logik
+              markise_blocked: >-
+                {% macro check_entity(entity_id) %}
+                  {% set s = states[entity_id] %}
+                  {{ (s is not none and s.last_changed.date() == now().date() and s.context.parent_id is none and s.context.user_id is not none) }}
+                {% endmacro %}
+                {{ check_entity(markise_entity) }}
+
+              gaube_blocked: >-
+                {% macro check_entity(entity_id) %}
+                  {% set s = states[entity_id] %}
+                  {{ (s is not none and s.last_changed.date() == now().date() and s.context.parent_id is none and s.context.user_id is not none) }}
+                {% endmacro %}
+                {{ check_entity(gaube_entity) }}
+
+          # --- HAUPTBESCHATTUNG ---
+          - choose:
+              # Fall 1: Schließen
+              - conditions:
+                  - condition: template
+                    value_template: "{{ states(sensor_helligkeit) | float(0) > limit_helligkeit | float }}"
+                  - condition: template
+                    value_template: "{{ states(sensor_temp) | float(0) > limit_temp | float }}"
+                  - condition: template
+                    value_template: "{{ current_azimuth >= (start_haupt | float) and current_azimuth < (stop_haupt | float) }}"
+                sequence:
+                  - if:
+                      - condition: template
+                        value_template: "{{ markise_blocked | trim == 'False' }}"
+                    then:
+                      - action: cover.set_cover_position
+                        data:
+                          position: "{{ p_markise }}"
+                        target:
+                          entity_id: "{{ markise_entity }}"
+                  - action: cover.set_cover_position
+                    data:
+                      position: "{{ p_haupt }}"
+                    target:
+                      entity_id: >-
+                        {% set ns = namespace(allowed=[]) %}
+                        {% for e in haupt_entities %}
+                          {% set s = states[e] %}
+                          {% set manual = s is not none and s.last_changed.date() == now().date() and s.context.parent_id is none and s.context.user_id is not none %}
+                          {% if not manual %}
+                            {% set ns.allowed = ns.allowed + [e] %}
+                          {% endif %}
+                        {% endfor %}
+                        {{ ns.allowed }}
+
+              # Fall 2: Öffnen
+              - conditions:
+                  - condition: template
+                    value_template: "{{ current_azimuth >= (stop_haupt | float) }}"
+                sequence:
+                  - if:
+                      - condition: template
+                        value_template: "{{ markise_blocked | trim == 'False' }}"
+                    then:
+                      - action: cover.set_cover_position
+                        data:
+                          position: 100
+                        target:
+                          entity_id: "{{ markise_entity }}"
+                  - action: cover.set_cover_position
+                    data:
+                      position: 100
+                    target:
+                      entity_id: >-
+                        {% set ns = namespace(allowed=[]) %}
+                        {% for e in haupt_entities %}
+                          {% set s = states[e] %}
+                          {% set manual = s is not none and s.last_changed.date() == now().date() and s.context.parent_id is none and s.context.user_id is not none %}
+                          {% if not manual %}
+                            {% set ns.allowed = ns.allowed + [e] %}
+                          {% endif %}
+                        {% endfor %}
+                        {{ ns.allowed }}
+
+          # --- GAUBENBESCHATTUNG ---
+          - if:
+              - condition: template
+                value_template: "{{ gaube_blocked | trim == 'False' }}"
+            then:
               - choose:
-                  # Schließen Bedingung
+                  # Fall 1: Schließen
                   - conditions:
                       - condition: template
-                        value_template: "{{ states(sensor_helligkeit) | float(0) > limit_helligkeit }}"
+                        value_template: "{{ states(sensor_helligkeit) | float(0) > limit_helligkeit | float }}"
                       - condition: template
-                        value_template: "{{ states(sensor_temp) | float(0) > limit_temp }}"
+                        value_template: "{{ states(sensor_temp) | float(0) > limit_temp | float }}"
                       - condition: template
-                        value_template: "{{ current_azimuth >= start_haupt and current_azimuth < stop_haupt }}"
+                        value_template: "{{ current_azimuth >= (start_gaube | float) and current_azimuth < (stop_gaube | float) }}"
                     sequence:
                       - action: cover.set_cover_position
                         data:
-                          position: "{{ pos_markise }}"
+                          position: "{{ p_gaube }}"
                         target:
-                          entity_id: cover.markise
-                  # Öffnen Bedingung
+                          entity_id: "{{ gaube_entity }}"
+                  # Fall 2: Öffnen
                   - conditions:
                       - condition: template
-                        value_template: "{{ current_azimuth >= stop_haupt }}"
+                        value_template: "{{ current_azimuth >= (stop_gaube | float) }}"
                     sequence:
                       - action: cover.set_cover_position
                         data:
                           position: 100
                         target:
-                          entity_id: cover.markise
-
-      # --- SEKTION B: HAUPTROLLLÄDEN ---
-      - choose:
-          - conditions:
-              - condition: state
-                entity_id: input_boolean.beschattung_override_haupt
-                state: "off"
-            sequence:
-              - choose:
-                  # Schließen Bedingung
-                  - conditions:
-                      - condition: template
-                        value_template: "{{ states(sensor_helligkeit) | float(0) > limit_helligkeit }}"
-                      - condition: template
-                        value_template: "{{ states(sensor_temp) | float(0) > limit_temp }}"
-                      - condition: template
-                        value_template: "{{ current_azimuth >= start_haupt and current_azimuth < stop_haupt }}"
-                    sequence:
-                      - action: cover.set_cover_position
-                        data:
-                          position: "{{ pos_haupt }}"
-                        target:
-                          entity_id:
-                            - cover.ja_schlafzimmer_schlafzimmer
-                            - cover.ja_arbeitszimmer_jalousie_arbeitszimmer_garten_jalousie
-                  # Öffnen Bedingung
-                  - conditions:
-                      - condition: template
-                        value_template: "{{ current_azimuth >= stop_haupt }}"
-                    sequence:
-                      - action: cover.set_cover_position
-                        data:
-                          position: 100
-                        target:
-                          entity_id:
-                            - cover.ja_schlafzimmer_schlafzimmer
-                            - cover.ja_arbeitszimmer_jalousie_arbeitszimmer_garten_jalousie
-
-      # --- SEKTION C: GAUBE ---
-      - choose:
-          - conditions:
-              - condition: state
-                entity_id: input_boolean.beschattung_override_gaube
-                state: "off"
-            sequence:
-              - choose:
-                  # Schließen Bedingung
-                  - conditions:
-                      - condition: template
-                        value_template: "{{ states(sensor_helligkeit) | float(0) > limit_helligkeit }}"
-                      - condition: template
-                        value_template: "{{ states(sensor_temp) | float(0) > limit_temp }}"
-                      - condition: template
-                        value_template: "{{ current_azimuth >= start_gaube and current_azimuth < stop_gaube }}"
-                    sequence:
-                      - action: cover.set_cover_position
-                        data:
-                          position: "{{ pos_gaube }}"
-                        target:
-                          entity_id: cover.ja_arbeitszimmer_gaube_jalousie_arbeitszimmer_gaube_jalousie
-                  # Öffnen Bedingung
-                  - conditions:
-                      - condition: template
-                        value_template: "{{ current_azimuth >= stop_gaube }}"
-                    sequence:
-                      - action: cover.set_cover_position
-                        data:
-                          position: 100
-                        target:
-                          entity_id: cover.ja_arbeitszimmer_gaube_jalousie_arbeitszimmer_gaube_jalousie
-
-  # ---------------------------------------------------------------------------
-  # AUTOMATION 2: Erkennen, wenn ein MENSCH die Aktoren bedient
-  # ---------------------------------------------------------------------------
-  - id: beschattung_erkenne_manuellen_eingriff
-    alias: "Beschattung: Manuellen Eingriff blockieren"
-    mode: parallel
-    trigger:
-      - platform: event
-        event_type: call_service
-        event_data:
-          domain: cover
-    condition:
-      # Nur reagieren, wenn der Befehl NICHT von dieser Automation selbst kommt
-      - condition: template
-        value_template: "{{ trigger.event.context.parent_id is none }}"
-      # Nur reagieren, wenn es sich um Fahrbefehle handelt
-      - condition: template
-        value_template: "{{ trigger.event.data.service in ['set_cover_position', 'open_cover', 'close_cover', 'stop_cover'] }}"
-    action:
-      - variables:
-          target_entity: "{{ trigger.event.data.service_data.entity_id }}"
-      - choose:
-          # Wurde die Markise manuell bewegt?
-          - conditions:
-              - condition: template
-                value_template: "{{ 'cover.markise' in target_entity }}"
-            sequence:
-              - action: input_boolean.turn_on
-                target:
-                  entity_id: input_boolean.beschattung_override_markise
-          
-          # Wurde einer der Hauptrollläden manuell bewegt?
-          - conditions:
-              - condition: template
-                value_template: >-
-                  {{ 'cover.ja_schlafzimmer_schlafzimmer' in target_entity or 
-                     'cover.ja_arbeitszimmer_jalousie_arbeitszimmer_garten_jalousie' in target_entity }}
-            sequence:
-              - action: input_boolean.turn_on
-                target:
-                  entity_id: input_boolean.beschattung_override_haupt
-
-          # Wurde die Gaube manuell bewegt?
-          - conditions:
-              - condition: template
-                value_template: "{{ 'cover.ja_arbeitszimmer_gaube_jalousie_arbeitszimmer_gaube_jalousie' in target_entity }}"
-            sequence:
-              - action: input_boolean.turn_on
-                target:
-                  entity_id: input_boolean.beschattung_override_gaube
-
-  # ---------------------------------------------------------------------------
-  # AUTOMATION 3: Jeden Morgen um 00:00 Uhr den manuellen Schutz zurücksetzen
-  # ---------------------------------------------------------------------------
-  - id: beschattung_reset_override
-    alias: "Beschattung: Manuellen Schutz um Mitternacht zurücksetzen"
-    trigger:
-      - platform: time
-        at: "00:00:00"
-    action:
-      - action: input_boolean.turn_off
-        target:
-          entity_id:
-            - input_boolean.beschattung_override_markise
-            - input_boolean.beschattung_override_haupt
-            - input_boolean.beschattung_override_gaube
+                          entity_id: "{{ gaube_entity }}"

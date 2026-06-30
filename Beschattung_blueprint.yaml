@@ -1,0 +1,238 @@
+blueprint:
+  name: "Komplexes Beschattungs-Management (Sonne, Temp, Helligkeit)"
+  description: "Steuert Haupt- und Zusatzbeschattung (z.B. Gaube) basierend auf Azimut, Temperatur und Helligkeit."
+  domain: automation
+  input:
+    # Sensoren
+    illuminance_sensor:
+      name: Helligkeitssensor
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: illuminance
+    temp_sensor:
+      name: Temperatursensor
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: temperature
+    
+    # Schwellenwerte
+    illuminance_limit:
+      name: Helligkeits-Grenzwert
+      description: "Oberhalb dieses Wertes wird beschattet."
+      default: 900
+      selector:
+        number:
+          min: 0
+          max: 100000
+          unit_of_measurement: lx
+    temp_limit:
+      name: Temperatur-Grenzwert
+      description: "Oberhalb dieser Temperatur wird beschattet."
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 50
+          unit_of_measurement: "°C"
+
+    # Winkel-Einstellungen
+    azimuth_start_haupt:
+      name: Azimut Start Hauptbeschattung
+      default: 90
+      selector:
+        number:
+          min: 0
+          max: 360
+          unit_of_measurement: "°"
+    azimuth_stop_haupt:
+      name: Azimut Ende Hauptbeschattung
+      default: 280
+      selector:
+        number:
+          min: 0
+          max: 360
+          unit_of_measurement: "°"
+    azimuth_start_gaube:
+      name: Azimut Start Gaubenbeschattung
+      default: 190
+      selector:
+        number:
+          min: 0
+          max: 360
+          unit_of_measurement: "°"
+    azimuth_stop_gaube:
+      name: Azimut Ende Gaubenbeschattung
+      default: 330
+      selector:
+        number:
+          min: 0
+          max: 360
+          unit_of_measurement: "°"
+
+    # Aktoren & Positionen
+    cover_markise:
+      name: Markise Aktor
+      selector:
+        entity:
+          filter:
+            - domain: cover
+    pos_markise:
+      name: Position Markise bei Beschattung
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+    covers_haupt:
+      name: Haupt-Rollläden/Jalousien
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: cover
+    pos_haupt:
+      name: Position Haupt-Rollläden bei Beschattung
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+    cover_gaube:
+      name: Gauben-Rollladen/Jalousie
+      selector:
+        entity:
+          filter:
+            - domain: cover
+    pos_gaube:
+      name: Position Gaube bei Beschattung
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+mode: restart
+
+trigger:
+  # Trigger für das Einschalten der Beschattung
+  - platform: numeric_state
+    entity_id: !input illuminance_sensor
+    above: !input illuminance_limit
+    id: check_activation
+  - platform: numeric_state
+    entity_id: !input temp_sensor
+    above: !input temp_limit
+    id: check_activation
+  - platform: numeric_state
+    entity_id: sun.sun
+    attribute: azimuth
+    above: !input azimuth_start_haupt
+    id: check_activation
+  
+  # Trigger für das separate Schließen der Gaube im Tagesverlauf
+  - platform: numeric_state
+    entity_id: sun.sun
+    attribute: azimuth
+    above: !input azimuth_start_gaube
+    id: check_gaube_activation
+
+  # Trigger für das Öffnen (Beenden)
+  - platform: numeric_state
+    entity_id: sun.sun
+    attribute: azimuth
+    above: !input azimuth_stop_haupt
+    id: stop_haupt
+  - platform: numeric_state
+    entity_id: sun.sun
+    attribute: azimuth
+    above: !input azimuth_stop_gaube
+    id: stop_gaube
+
+action:
+  - choose:
+      # FALL 1: Hauptbeschattung aktivieren (und ggf. direkt die Gaube mit)
+      - conditions:
+          - condition: trigger
+            id: check_activation
+          - condition: numeric_state
+            entity_id: !input illuminance_sensor
+            above: !input illuminance_limit
+          - condition: numeric_state
+            entity_id: !input temp_sensor
+            above: !input temp_limit
+          - condition: template
+            value_template: "{{ state_attr('sun.sun', 'azimuth') >= (states('input_number.azimuth_start_haupt') | float(90)) }}"
+          - condition: template
+            value_template: "{{ state_attr('sun.sun', 'azimuth') < (states('input_number.azimuth_stop_haupt') | float(280)) }}"
+        sequence:
+          - action: cover.set_cover_position
+            data:
+              position: !input pos_markise
+            target:
+              entity_id: !input cover_markise
+          - action: cover.set_cover_position
+            data:
+              position: !input pos_haupt
+            target:
+              entity_id: !input covers_haupt
+          # Falls der Azimut jetzt schon über dem Gauben-Startwert liegt, Gaube direkt mit schließen
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ state_attr('sun.sun', 'azimuth') >= (states('input_number.azimuth_start_gaube') | float(190)) }}"
+                sequence:
+                  - action: cover.set_cover_position
+                    data:
+                      position: !input pos_gaube
+                    target:
+                      entity_id: !input cover_gaube
+
+      # FALL 2: Sonne erreicht den Gauben-Winkel (Nachzügler)
+      - conditions:
+          - condition: trigger
+            id: check_gaube_activation
+          - condition: numeric_state
+            entity_id: !input illuminance_sensor
+            above: !input illuminance_limit
+          - condition: numeric_state
+            entity_id: !input temp_sensor
+            above: !input temp_limit
+        sequence:
+          - action: cover.set_cover_position
+            data:
+              position: !input pos_gaube
+            target:
+              entity_id: !input cover_gaube
+
+      # FALL 3: Hauptbeschattung beenden
+      - conditions:
+          - condition: trigger
+            id: stop_haupt
+        sequence:
+          - action: cover.set_cover_position
+            data:
+              position: 100
+            target:
+              entity_id:
+                - !input cover_markise
+                - !input covers_haupt
+
+      # FALL 4: Gaube beenden
+      - conditions:
+          - condition: trigger
+            id: stop_gaube
+        sequence:
+          - action: cover.set_cover_position
+            data:
+              position: 100
+            target:
+              entity_id: !input cover_gaube

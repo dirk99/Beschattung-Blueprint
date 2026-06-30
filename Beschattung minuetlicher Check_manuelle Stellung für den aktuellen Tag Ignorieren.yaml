@@ -1,0 +1,270 @@
+blueprint:
+  name: "Intervall-Beschattungs-Management (mit manuellem Override-Schutz)"
+  description: "Prüft jede Minute Azimut, Temperatur und Helligkeit. Wurde ein Aktor heute manuell verändert, wird er für den Rest des Tages ignoriert."
+  domain: automation
+  input:
+    # Sensoren
+    illuminance_sensor:
+      name: Helligkeitssensor
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: illuminance
+    temp_sensor:
+      name: Temperatursensor
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: temperature
+    
+    # Schwellenwerte
+    illuminance_limit:
+      name: Helligkeits-Grenzwert
+      default: 900
+      selector:
+        number:
+          min: 0
+          max: 100000
+          unit_of_measurement: lx
+    temp_limit:
+      name: Temperatur-Grenzwert
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 50
+          unit_of_measurement: "°C"
+
+    # Winkel-Einstellungen
+    azimuth_start_haupt:
+      name: Azimut Start Hauptbeschattung
+      default: 90
+      selector:
+        number:
+          min: 0
+          max: 360
+          unit_of_measurement: "°"
+    azimuth_stop_haupt:
+      name: Azimut Ende Hauptbeschattung
+      default: 280
+      selector:
+        number:
+          min: 0
+          max: 360
+          unit_of_measurement: "°"
+    azimuth_start_gaube:
+      name: Azimut Start Gaubenbeschattung
+      default: 190
+      selector:
+        number:
+          min: 0
+          max: 360
+          unit_of_measurement: "°"
+    azimuth_stop_gaube:
+      name: Azimut Ende Gaubenbeschattung
+      default: 330
+      selector:
+        number:
+          min: 0
+          max: 360
+          unit_of_measurement: "°"
+
+    # Aktoren & Positionen
+    cover_markise:
+      name: Markise Aktor
+      selector:
+        entity:
+          filter:
+            - domain: cover
+    pos_markise:
+      name: Position Markise bei Beschattung
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+    covers_haupt:
+      name: Haupt-Rollläden/Jalousien
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: cover
+    pos_haupt:
+      name: Position Haupt-Rollläden bei Beschattung
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+    cover_gaube:
+      name: Gauben-Rollladen/Jalousie
+      selector:
+        entity:
+          filter:
+            - domain: cover
+    pos_gaube:
+      name: Position Gaube bei Beschattung
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+mode: single
+
+trigger:
+  - platform: time_pattern
+    minutes: "/1"
+
+action:
+  - variables:
+      start_haupt: !input azimuth_start_haupt
+      stop_haupt: !input azimuth_stop_haupt
+      start_gaube: !input azimuth_start_gaube
+      stop_gaube: !input azimuth_stop_gaube
+      current_azimuth: "{{ state_attr('sun.sun', 'azimuth') | float(0) }}"
+      
+      # Entitäten aus dem Input holen
+      markise_entity: !input cover_markise
+      gaube_entity: !input cover_gaube
+      # Da covers_haupt eine Liste sein kann, erzwingen wir ein sauberes Format
+      haupt_entities: >-
+        {% set h = !input covers_haupt %}
+        {{ [h] if h is string else h }}
+
+      # JINJA-Makro zur Prüfung auf manuellen Override AM HEUTIGEN TAG
+      # Erklärt: Wenn der Zustand heute geändert wurde (last_changed ist heute) 
+      # UND die Änderung NICHT von einer Automation stammt (parent_id ist none) 
+      # UND entweder von einem User oder dem Web-UI ausgelöst wurde (user_id nicht leer) -> Override aktiv.
+      is_manually_overridden: >-
+        {% flexo(entity_id) %}
+          {% set s = states[entity_id] %}
+          {% if s is not none %}
+            {% set last_ch = s.last_changed %}
+            {% set is_today = last_ch.date() == now().date() %}
+            {% set manual = s.context.parent_id is none and s.context.user_id is not none %}
+            {{ is_today and manual }}
+          {% else %}
+            false
+          {% endif %}
+        {% endmacro %}
+
+      # Einzelne Vorabprüfungen für die Aktoren
+      markise_blocked: "{{ is_manually_overridden(markise_entity) | trim == 'true' }}"
+      gaube_blocked: "{{ is_manually_overridden(gaube_entity) | trim == 'true' }}"
+
+  # ---------------------------------------------------------------------------
+  # BLOCK A: HAUPTBESCHATTUNG (Markise & Hauptrollläden)
+  # ---------------------------------------------------------------------------
+  - choose:
+      # FALL 1: Schließen
+      - conditions:
+          - condition: numeric_state
+            entity_id: !input illuminance_sensor
+            above: !input illuminance_limit
+          - condition: numeric_state
+            entity_id: !input temp_sensor
+            above: !input temp_limit
+          - condition: template
+            value_template: "{{ current_azimuth >= (start_haupt | float) and current_azimuth < (stop_haupt | float) }}"
+        sequence:
+          # Markise steuern (falls nicht manuell blockiert)
+          - if:
+              - condition: template
+                value_template: "{{ not markise_blocked }}"
+            then:
+              - action: cover.set_cover_position
+                data:
+                  position: !input pos_markise
+                target:
+                  entity_id: "{{ markise_entity }}"
+          
+          # Hauptrollläden filtern und steuern (nur die nicht blockierten)
+          - action: cover.set_cover_position
+            data:
+              position: !input pos_haupt
+            target:
+              entity_id: >-
+                {% set filtered = haupt_entities | reject('test', 'defined', 'is_manually_overridden') | list %}
+                {# Da ein Makro im Filter komplex ist, bauen wir eine einfache Schleife: #}
+                {% set ns = namespace(allowed=[]) %}
+                {% for e in haupt_entities %}
+                  {% if is_manually_overridden(e) | trim != 'true' %}
+                    {% set ns.allowed = ns.allowed + [e] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.allowed }}
+
+      # FALL 2: Öffnen (Sonne zieht weiter)
+      - conditions:
+          - condition: template
+            value_template: "{{ current_azimuth >= (stop_haupt | float) }}"
+        sequence:
+          # Markise öffnen (wenn unblockiert)
+          - if:
+              - condition: template
+                value_template: "{{ not markise_blocked }}"
+            then:
+              - action: cover.set_cover_position
+                data:
+                  position: 100
+                target:
+                  entity_id: "{{ markise_entity }}"
+          
+          # Hauptrollläden öffnen (nur unblockierte)
+          - action: cover.set_cover_position
+            data:
+              position: 100
+            target:
+              entity_id: >-
+                {% set ns = namespace(allowed=[]) %}
+                {% for e in haupt_entities %}
+                  {% if is_manually_overridden(e) | trim != 'true' %}
+                    {% set ns.allowed = ns.allowed + [e] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.allowed }}
+
+  # ---------------------------------------------------------------------------
+  # BLOCK B: GAUBENBESCHATTUNG
+  # ---------------------------------------------------------------------------
+  - if:
+      - condition: template
+        value_template: "{{ not gaube_blocked }}"
+    then:
+      - choose:
+          # FALL 1: Schließen
+          - conditions:
+              - condition: numeric_state
+                entity_id: !input illuminance_sensor
+                above: !input illuminance_limit
+              - condition: numeric_state
+                entity_id: !input temp_sensor
+                above: !input temp_limit
+              - condition: template
+                value_template: "{{ current_azimuth >= (start_gaube | float) and current_azimuth < (stop_gaube | float) }}"
+            sequence:
+              - action: cover.set_cover_position
+                data:
+                  position: !input pos_gaube
+                target:
+                  entity_id: "{{ gaube_entity }}"
+
+          # FALL 2: Öffnen
+          - conditions:
+              - condition: template
+                value_template: "{{ current_azimuth >= (stop_gaube | float) }}"
+            sequence:
+              - action: cover.set_cover_position
+                data:
+                  position: 100
+                target:
+                  entity_id: "{{ gaube_entity }}"

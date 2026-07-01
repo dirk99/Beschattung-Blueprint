@@ -1,9 +1,8 @@
 blueprint:
-  name: "Erweiterte Beschattung nach Azimut, Helligkeit & Temperatur"
-  description: "Steuert Markise und Rollladen basierend auf Sonnenstand, Temperatur und Helligkeit inklusive Erkennung manueller Eingriffe."
+  name: "Autarke Beschattung nach Azimut (Inkl. interner Sperre)"
+  description: "Steuert Markise und Rollladen basierend auf Sonnenstand, Temperatur und Helligkeit. Blockiert sich bei manuellem Eingriff autark ohne externe Helfer."
   domain: automation
   input:
-    # Sensoren
     illuminance_sensor:
       name: Helligkeitssensor
       selector:
@@ -18,8 +17,6 @@ blueprint:
           filter:
             - domain: sensor
               device_class: temperature
-    
-    # Aktoren
     cover_markise:
       name: Markise
       selector:
@@ -45,41 +42,20 @@ blueprint:
           filter:
             - domain: cover
 
-    # Blockade-Helfer
-    block_markise:
-      name: Helfer Sperre Markise
-      selector:
-        entity:
-          filter:
-            - domain: input_boolean
-    block_schlafzimmer:
-      name: Helfer Sperre Schlafzimmer
-      selector:
-        entity:
-          filter:
-            - domain: input_boolean
-    block_az_garten:
-      name: Helfer Sperre AZ Garten
-      selector:
-        entity:
-          filter:
-            - domain: input_boolean
-    block_az_gaube:
-      name: Helfer Sperre AZ Gaube
-      selector:
-        entity:
-          filter:
-            - domain: input_boolean
+# Das "Geheimnis": Wir deklarieren interne Variablen, die den Zustand sichern
+variables:
+  # Standardmäßig sind am Tagesanfang keine Geräte blockiert
+  blocked_devices: []
 
 mode: parallel
 max: 10
 
 trigger:
-  # Trigger 1: Minütliche Prüfung für die Fahrt
+  # Trigger 1: Minütliche Prüfung
   - platform: time_pattern
     minutes: "/1"
     id: "check_automation"
-  # Trigger 2: Überwachung manueller Eingriffe (Positionsänderung)
+  # Trigger 2: Manueller Eingriff
   - platform: state
     entity_id:
       - !input cover_markise
@@ -116,9 +92,8 @@ action:
                     value_template: "{{ 90 <= state_attr('sun.sun', 'azimuth') <= 270 }}"
                 sequence:
                   - if:
-                      - condition: state
-                        entity_id: !input block_markise
-                        state: "off"
+                      - condition: template
+                        value_template: "{{  (blueprint_inputs.cover_markise) not in blocked_devices }}"
                     then:
                       - service: cover.set_cover_position
                         target:
@@ -126,9 +101,8 @@ action:
                         data:
                           position: 0
                   - if:
-                      - condition: state
-                        entity_id: !input block_schlafzimmer
-                        state: "off"
+                      - condition: template
+                        value_template: "{{ (blueprint_inputs.cover_schlafzimmer) not in blocked_devices }}"
                     then:
                       - service: cover.set_cover_position
                         target:
@@ -136,9 +110,8 @@ action:
                         data:
                           position: 40
                   - if:
-                      - condition: state
-                        entity_id: !input block_az_garten
-                        state: "off"
+                      - condition: template
+                        value_template: "{{ (blueprint_inputs.cover_az_garten) not in blocked_devices }}"
                     then:
                       - service: cover.set_cover_position
                         target:
@@ -151,9 +124,8 @@ action:
                     value_template: "{{ state_attr('sun.sun', 'azimuth') >= 280 }}"
                 sequence:
                   - if:
-                      - condition: state
-                        entity_id: !input block_markise
-                        state: "off"
+                      - condition: template
+                        value_template: "{{ (blueprint_inputs.cover_markise) not in blocked_devices }}"
                     then:
                       - service: cover.set_cover_position
                         target:
@@ -161,9 +133,8 @@ action:
                         data:
                           position: 100
                   - if:
-                      - condition: state
-                        entity_id: !input block_schlafzimmer
-                        state: "off"
+                      - condition: template
+                        value_template: "{{ (blueprint_inputs.cover_schlafzimmer) not in blocked_devices }}"
                     then:
                       - service: cover.set_cover_position
                         target:
@@ -171,9 +142,8 @@ action:
                         data:
                           position: 100
                   - if:
-                      - condition: state
-                        entity_id: !input block_az_garten
-                        state: "off"
+                      - condition: template
+                        value_template: "{{ (blueprint_inputs.cover_az_garten) not in blocked_devices }}"
                     then:
                       - service: cover.set_cover_position
                         target:
@@ -187,9 +157,8 @@ action:
               - conditions:
                   - condition: template
                     value_template: "{{ 190 <= state_attr('sun.sun', 'azimuth') < 330 }}"
-                  - condition: state
-                    entity_id: !input block_az_gaube
-                    state: "off"
+                  - condition: template
+                    value_template: "{{ (blueprint_inputs.cover_az_gaube) not in blocked_devices }}"
                 sequence:
                   - service: cover.set_cover_position
                     target:
@@ -200,9 +169,8 @@ action:
               - conditions:
                   - condition: template
                     value_template: "{{ state_attr('sun.sun', 'azimuth') >= 330 }}"
-                  - condition: state
-                    entity_id: !input block_az_gaube
-                    state: "off"
+                  - condition: template
+                    value_template: "{{ (blueprint_inputs.cover_az_gaube) not in blocked_devices }}"
                 sequence:
                   - service: cover.set_cover_position
                     target:
@@ -214,42 +182,19 @@ action:
       - conditions:
           - condition: trigger
             id: "manual_override"
-          # Prüft, ob diese Automation sich NICHT innerhalb der letzten 5 Sekunden selbst bewegt hat
+          # Verhindert, dass die Automation sich selbst blockiert (5 Sekunden Cooldown)
           - condition: template
             value_template: >
               {{ (as_timestamp(now()) - as_timestamp(state_attr(this.entity_id, 'last_triggered') | default(0))) > 5 }}
         sequence:
-          - choose:
-              - conditions: "{{ trigger.entity_id == (blueprint_inputs.cover_markise | default('')) }}"
-                sequence:
-                  - service: input_boolean.turn_on
-                    target:
-                      entity_id: !input block_markise
-              - conditions: "{{ trigger.entity_id == (blueprint_inputs.cover_schlafzimmer | default('')) }}"
-                sequence:
-                  - service: input_boolean.turn_on
-                    target:
-                      entity_id: !input block_schlafzimmer
-              - conditions: "{{ trigger.entity_id == (blueprint_inputs.cover_az_garten | default('')) }}"
-                sequence:
-                  - service: input_boolean.turn_on
-                    target:
-                      entity_id: !input block_az_garten
-              - conditions: "{{ trigger.entity_id == (blueprint_inputs.cover_az_gaube | default('')) }}"
-                sequence:
-                  - service: input_boolean.turn_on
-                    target:
-                      entity_id: !input block_az_gaube
+          # Wir fügen die ausgelöste Entität dynamisch der Blockiert-Liste hinzu
+          - variables:
+              blocked_devices: "{{ blocked_devices + [trigger.entity_id] }}"
 
-      # --- FALL 3: Mitternachts-Reset der Helfer ---
+      # --- FALL 3: Mitternachts-Reset der Liste ---
       - conditions:
           - condition: trigger
             id: "midnight_reset"
         sequence:
-          - service: input_boolean.turn_off
-            target:
-              entity_id:
-                - !input block_markise
-                - !input block_schlafzimmer
-                - !input block_az_garten
-                - !input block_az_gaube
+          - variables:
+              blocked_devices: []
